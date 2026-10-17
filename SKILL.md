@@ -1,327 +1,89 @@
 ---
 name: wechat-exporter
-description: Use when the user says "wechat-exporter", "导出微信", "更新微信聊天记录", or wants to export, decrypt, or refresh WeChat chat history and contacts on macOS.
+description: Use when the user says "wechat-exporter", "导出微信", "更新微信聊天记录", or wants to implement, decrypt, export, or refresh authorized local WeChat databases on macOS using the bundled implementation guide.
 ---
 
 # wechat-exporter
 
-导出、解密微信聊天记录，输出结构化 SQLite 数据库，供 MCP 工具查询使用。
-
-## 决策流程
-
-```dot
-digraph wechat_exporter {
-    "开始" [shape=doublecircle];
-    "工具目录存在?" [shape=diamond];
-    "首次安装" [shape=box];
-    "检测微信版本变化?" [shape=diamond];
-    "重签名 + 重提取 key" [shape=box];
-    "直接解密" [shape=box];
-    "更新版本记录" [shape=box];
-    "运行 decrypt_db.py" [shape=box];
-    "输出摘要" [shape=box];
-    "完成" [shape=doublecircle];
-
-    "开始" -> "工具目录存在?";
-    "工具目录存在?" -> "首次安装" [label="否"];
-    "工具目录存在?" -> "检测微信版本变化?" [label="是"];
-    "首次安装" -> "检测微信版本变化?";
-    "检测微信版本变化?" -> "重签名 + 重提取 key" [label="版本变更或无 key"];
-    "检测微信版本变化?" -> "直接解密" [label="版本未变"];
-    "重签名 + 重提取 key" -> "更新版本记录";
-    "直接解密" -> "运行 decrypt_db.py";
-    "更新版本记录" -> "运行 decrypt_db.py";
-    "运行 decrypt_db.py" -> "输出摘要";
-    "输出摘要" -> "完成";
-}
-```
-
----
+基于内置规范，为本人授权的 macOS 微信 4.x 本地 SQLCipher 数据库实现、测试和运行解密工具，输出经过验收的标准 SQLite 数据库。本仓库提供技能与规范，不附带现成扫描器、解密脚本或 MCP Server；不要声称安装技能后就已具备这些程序。
 
-## 路径常量
+## 必读材料与优先级
 
-| 变量 | 路径 |
-|------|------|
-| 工具目录 | `~/wechat-decrypt-macos/` |
-| Python | `~/wechat-decrypt-macos/.venv/bin/python` |
-| 扫描器 | `~/wechat-decrypt-macos/find_all_keys_macos` |
-| 密钥文件 | `~/wechat-decrypt-macos/all_keys.json` |
-| 版本记录 | `~/wechat-decrypt-macos/.wechat_version` |
-| config | `~/wechat-decrypt-macos/config.json` |
-| 解密输出 | `~/wechat-decrypt-macos/decrypted/` |
+开始实现或处理真实数据前，完整阅读本技能目录下的 [references/agent-decrypt-guide.md](references/agent-decrypt-guide.md)，包含附录。相对路径以本技能目录为基准，不是当前工作目录。
 
----
-
-## Step 1：检查工具目录
-
-```bash
-ls ~/wechat-decrypt-macos/
-```
-
-若目录不存在或缺少关键文件（`.venv/`、`find_all_keys_macos.c`、`decrypt_db.py`），执行首次安装流程。
-
----
-
-## Step 2：首次安装（仅首次需要）
-
-```bash
-# 2.1 安装系统依赖
-brew install sqlcipher
-
-# 2.2 克隆主仓库
-git clone https://github.com/cocohahaha/wechat-decrypt-macos.git ~/wechat-decrypt-macos
-cd ~/wechat-decrypt-macos
-
-# 2.3 下载解密脚本（ylytdeng/wechat-decrypt）
-curl -sL https://raw.githubusercontent.com/ylytdeng/wechat-decrypt/main/find_all_keys_macos.c -o find_all_keys_macos.c
-curl -sL https://raw.githubusercontent.com/ylytdeng/wechat-decrypt/main/decrypt_db.py -o decrypt_db.py
-curl -sL https://raw.githubusercontent.com/ylytdeng/wechat-decrypt/main/config.py -o config.py
-curl -sL https://raw.githubusercontent.com/ylytdeng/wechat-decrypt/main/key_utils.py -o key_utils.py
+- 页面格式、密钥验证、快照、WAL 和验收以该指南为准，不用本文件的摘要代替完整规范。
+- [references/database-schema.md](references/database-schema.md) 仅为解密后查询的历史结构参考，按需阅读并核验当前版本。
+- 不再从旧版依赖仓库下载脚本，不假设 `find_all_keys_macos`、`decrypt_db.py`、`all_keys.json` 或 `server.py` 已存在或具有固定接口。
+- 指南覆盖已取得密钥后的解密流程；密钥获取仅对分支 A 提供完整实现思路，分支 B 需版本相关分析。不得承诺所有微信 4.x 版本都可自动完成。
 
-# 2.4 创建 Python 虚拟环境并安装依赖
-python3 -m venv .venv
-.venv/bin/pip install "mcp[cli]>=1.0.0" pycryptodome
+## 1. 明确范围与授权
 
-# 2.5 编译内存扫描器
-cc -O2 -o find_all_keys_macos find_all_keys_macos.c -framework Foundation
+确认目标账号、数据范围、工具工作目录、输出目录，以及用户要实现工具还是实际导出。发现多个账号时先列出候选并确认授权范围，不按“最近修改”自行选择账号，也不自动处理未授权账号。
 
-# 2.6 修改 server.py 读取明文数据库（见"server.py 必要修改"一节）
-
-# 2.7 注册 MCP Server
-claude mcp add -s user wechat \
-  ~/wechat-decrypt-macos/.venv/bin/python \
-  ~/wechat-decrypt-macos/server.py
-```
-
-**首次安装后还需要**：
-1. 系统设置 → 隐私与安全性 → 完全磁盘访问权限 → 添加当前终端
-2. 继续执行 Step 3
-
----
-
-## Step 3：检测微信版本变化
-
-```bash
-CURRENT=$(defaults read /Applications/WeChat.app/Contents/Info.plist CFBundleShortVersionString)
-STORED=$(cat ~/wechat-decrypt-macos/.wechat_version 2>/dev/null || echo "")
-echo "当前版本: $CURRENT  存档版本: $STORED"
-```
-
-- 若 `CURRENT == STORED` 且 `all_keys.json` 存在 → 跳到 Step 5（直接解密）
-- 否则 → 执行 Step 4（重签名 + 重提取）
+仅处理本人设备、本人账号及本人授权的数据。不得覆盖原始库，不把密钥、数据库、消息正文或内存转储写入日志、版本控制或对外发送。工作目录放在源码仓库之外；目录权限收紧，确需持久化的密钥文件权限为 `600`，报告只含必要的非敏感状态。不要让用户粘贴密钥或完整扫描输出。
 
----
+应用重签名、退出/重启客户端、改变系统保护状态等操作必须单独说明影响并取得明确授权。不要因版本变化自动重签名，不自动关闭 SIP。需要提权时说明具体命令和目的，由用户通过安全的本地方式完成，不收集密码。
 
-## Step 4：重签名 + 提取密钥（版本变更时）
+## 2. 检查环境与已有实现
 
-```bash
-# 4.1 确认微信已登录
-pgrep -l WeChat  # 必须有进程，否则提示用户先登录
+1. 发现客户端与 `db_storage` 路径，不硬编码应用名、账号目录或分片数量。
+2. 检查现有编译器、`uv`、SQLCipher 等工具；缺少时再按用户环境安装。系统工具使用 Homebrew，Python 环境与依赖使用 `uv`，不使用系统 `pip`。
+3. 若已有本地实现，先审查其接口与测试是否符合指南，再决定复用或补齐；不能凭目录存在就直接运行。
+4. 若没有实现，按指南附录 B 拆分模块：发现、候选密钥、页面认证、逐页解密、一致快照、SQLCipher checkpoint、独立内容比对、逐库报告。
 
-# 4.2 重签名（如果是微信更新后第一次运行）
-# ⚠️ 重签名前需退出微信，然后重新启动登录
-sudo codesign --force --deep --sign - /Applications/WeChat.app
-# 重新启动微信并等待用户登录
+语言不限。可用 C/Mach API 实现扫描，用 Python 的 `hashlib` 与 AES 库实现页面处理；不强制复刻旧脚本接口。
 
-# 4.3 提取密钥（需要 sudo，必须让用户手动在终端执行）
-cd ~/wechat-decrypt-macos
-sudo ./find_all_keys_macos
-# 输出 all_keys.json，包含各数据库的加密密钥
+## 3. 先实现并验证无真实数据的闭环
 
-# 4.4 更新版本记录
-echo "$CURRENT" > ~/wechat-decrypt-macos/.wechat_version
-```
+先完成指南第 6、7、9、10 节，不先操作微信进程：
 
-> ⚠️ `sudo ./find_all_keys_macos` 需要用户手动在终端执行（需要密码），Agent 无法替代。
-> 提示用户执行后粘贴输出内容确认成功。
+- 用 SQLCipher 按目标参数生成已知内容的独立测试库，验证全页 HMAC、解密后文件尺寸、SQLite `integrity_check` 和逻辑内容。
+- 覆盖第一页偏移、页码小端、认证密钥派生、80 字节保留区；错密钥、篡改页与截断输入必须失败，不能输出正式成功产物。
+- 构造真正留在 WAL 中的已提交更新，尤其是只更新字段、不改变行数的用例；断言忽略 WAL 得旧值，正确 checkpoint 后得新值。
+- 按指南第 10 节覆盖危险分支并写清预期行为。自制加密器与解密器往返只算单元测试，不能代替独立实现交叉验证。
 
----
+测试未通过，不进入真实数据导出。没有运行过的测试必须标注未验证，不把文档内的实测记录当作本次实现的测试结果。
 
-## Step 5：确定账号目录并更新 config.json
+## 4. 取得并逐库验证密钥
 
-```bash
-# 找到最近活跃的账号目录（当前登录账号）
-ls -lt ~/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/ | \
-  grep -v "^total\|Backup\|all_users\|old_backup" | head -5
-```
+客户端运行时，按指南第 3–5 节检查权限和密钥形态。版本号仅作诊断信息，不作为跳过验证的条件。
 
-选择 `db_storage/message/message_0.db` 修改时间最新的目录，写入 config.json：
+- 物理文件身份用账号加相对路径；候选按 salt 索引并保留多个候选；每个库独立校验，输出也按账号隔离。
+- 分支 A 扫描标准 key/salt 字符串，处理分块重叠、去重与第一页 HMAC 验证。
+- 无候选时先排查权限、进程、扫描覆盖和数据库是否已加载，不直接断定分支 B 或重签名。
+- 分支 B 的 passphrase 获取不由指南完整覆盖。不能取得时停止对应库并报告不支持/缺密钥，不猜测或承诺可恢复。
+- 密钥缓存存在也必须逐库重验。扫描完成、格式匹配、版本未变均不代表密钥有效。
 
-```bash
-ACCOUNT_DIR="<确认的账号目录名>"  # 例如 robbinfankai_f79d
-cat > ~/wechat-decrypt-macos/config.json << EOF
-{
-    "db_dir": "$HOME/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/${ACCOUNT_DIR}/db_storage",
-    "keys_file": "$HOME/wechat-decrypt-macos/all_keys.json",
-    "decrypted_dir": "$HOME/wechat-decrypt-macos/decrypted",
-    "wechat_process": "WeChat"
-}
-EOF
-```
+## 5. 建立一致快照并处理 WAL
 
----
+先取得密钥，再在整个复制期间确保停止写入，或采用能提供一致视图的快照方式。保留不参与改写的基准快照，记录采集时点及主库、WAL、SHM 文件清单。`-shm` 可缺失；不能漏掉存在的 WAL。
 
-## Step 6：运行解密
+默认路线严格执行指南第 8.5 节：从基准快照建立可丢弃工作副本，让 SQLCipher checkpoint，再解密该工作副本。独立验证使用从同一基准快照另建的副本。
 
-```bash
-cd ~/wechat-decrypt-macos
-.venv/bin/python decrypt_db.py
-```
+checkpoint 判定先检查 SQL 错误、不支持状态与 busy；`(0,-1,-1)` 单独解释；普通成功要求 busy 为 0、log 与 checkpointed 非负且相等。busy 为 0 本身不代表完成，TRUNCATE 的零计数也不能证明原先没有 WAL。
 
-期望输出：`结果: N 成功, 1 失败` 或类似（1 失败为正常，`migrate/unspportmsg.db` 无密钥）。
+无法建立一致副本时，不能通过快照恢复验收。自写受限 WAL 恢复仅按第 8.4 节执行并标注限制，不宣称完整最新；遇到未经验证的页 1 帧，转 SQLCipher 或报告不支持。
 
----
+指南中的 SQLCipher 命令是参数示意。工程实现不要把真实密钥拼进命令行参数、shell 历史或错误日志；通过受控进程输入或库接口提供，并对错误输出脱敏。
 
-## Step 7：输出导出摘要
+## 6. 解密与验收
 
-解密完成后查询以下内容并展示给用户：
+按指南逐页先认证后解密，不去 PKCS#7 填充，不修改 SQLite 保留字节数，不静默补齐截断页。正式输出目录不得混入源密文 WAL/SHM。失败产物与通过验收的输出隔离并明确标记。
 
-```bash
-# 个人好友数（local_type=1 = 真实好友，排除公众号和群）
-/usr/bin/sqlite3 ~/wechat-decrypt-macos/decrypted/contact/contact.db \
-"SELECT count(*) FROM contact
- WHERE delete_flag=0 AND local_type=1
- AND username NOT LIKE 'gh_%'
- AND username NOT LIKE '%@chatroom';"
+验收必须区分：
 
-# 消息数据库文件数及总大小
-ls ~/wechat-decrypt-macos/decrypted/message/message_[0-9]*.db | wc -l
-du -sh ~/wechat-decrypt-macos/decrypted/message/
+1. 主库解密通过：全页 HMAC、页面布局、输入输出尺寸、只读 SQLite 结构检查和同快照同视图的独立内容比对。
+2. 快照恢复通过：输入一致、有效已提交 WAL 已正确处理，并注明快照时点。
+3. 目标范围全部处理并报告：每个授权账号、每个目标库都有结论，不代表全部恢复成功。
 
-# 最新消息时间（从 session.db 查，比从 Msg_ 表查更可靠）
-/usr/bin/sqlite3 ~/wechat-decrypt-macos/decrypted/session/session.db \
-"SELECT datetime(max(last_timestamp), 'unixepoch', '+8 hours') FROM SessionTable;"
-```
-
-**输出摘要格式示例**：
-```
-✅ 微信聊天记录导出完成
-━━━━━━━━━━━━━━━━━━━━━━━━
-个人联系人：2,540 人
-消息数据库：12 个分片
-数据库总大小：约 380MB
-最新消息时间：2026-04-17 11:28
-━━━━━━━━━━━━━━━━━━━━━━━━
-MCP 工具已就绪，可直接查询。
-```
-
----
-
-## 数据库结构说明
-
-### 消息分片（message_*.db）
-
-分片按**时间段**切割，不是按联系人。`message_0.db` 是主力库（含最近一年大多数会话），编号越大一般越老，但**不是严格线性**——某些编号（如 message_4.db）可能存放最近新建会话的溢出数据，反而比 message_0.db 更新：
-
-| 分片 | 时间范围（实测示例） |
-|------|---------------------|
-| message_4.db | 2026-04（最新溢出，28 个新会话） |
-| message_0.db | 2025-04 ~ 2026-04（主力库，629 个会话） |
-| message_1.db | 2024-04 ~ 2025-04 |
-| message_2.db | 2023-06 ~ 2024-02 |
-| message_5~7.db | 2019~2022 年的历史数据 |
-
-统计最新消息时间应查 `session.db`，不要只取某张 Msg_ 表（该表可能是老会话）。
-
-### Msg_ 表名与联系人的映射关系
-
-`message_*.db` 中每个联系人的消息存在独立的表里，命名为 `Msg_<hash>`。
-
-- `<hash>` = 联系人 `username` 的 **MD5**
-- `Name2Id` 表只存 `user_name`（无 hash 列），需自行计算反查：
-
-```python
-import hashlib, sqlite3
-
-conn = sqlite3.connect("message_0.db")
-cur = conn.cursor()
-cur.execute("SELECT user_name FROM Name2Id")
-md5_to_user = {
-    hashlib.md5(row[0].encode()).hexdigest(): row[0]
-    for row in cur.fetchall()
-}
-# md5_to_user["6925d39..."] → "wxid_bc95l9h68t6z22"
-```
-
-### contact 表 local_type 含义
-
-| local_type | 含义 |
-|------------|------|
-| 1 | 真实好友（双向添加） |
-| 3 | 有过消息往来但未必是好友（含群聊中的非好友） |
-| 0 | 服务号、系统通知 |
-
-统计"个人好友"用 `local_type=1`，再排除 `gh_` 开头（公众号）和 `@chatroom`（群）。
-
----
-
-## server.py 必要修改
-
-首次安装时需修改 `~/wechat-decrypt-macos/server.py`，让其读取明文数据库而非加密库：
-
-**修改点 1**：配置区（文件顶部约第15行）
-```python
-# 改为：
-SQLCIPHER_PATH = "/usr/bin/sqlite3"
-DECRYPTED_DIR = os.path.join(os.path.dirname(__file__), "decrypted")
-```
-
-**修改点 2**：`_load_key()` 函数
-```python
-def _load_key() -> str:
-    return ""
-```
-
-**修改点 3**：`_find_data_dir()` 函数
-```python
-def _find_data_dir() -> str:
-    if not os.path.isdir(DECRYPTED_DIR):
-        raise FileNotFoundError(f"解密目录不存在: {DECRYPTED_DIR}")
-    return DECRYPTED_DIR
-```
-
-**修改点 4**：`_preamble()` 函数
-```python
-def _preamble(key: str) -> str:
-    return ""
-```
-
-**修改点 5**：`_test_key()` 函数
-```python
-def _test_key(key: str, db_path: str) -> bool:
-    if not os.path.exists(db_path):
-        return False
-    try:
-        result = subprocess.run(
-            [SQLCIPHER_PATH, db_path, "SELECT count(*) FROM sqlite_master;"],
-            capture_output=True, timeout=5,
-        )
-        return result.returncode == 0
-    except Exception:
-        return False
-```
-
-**修改点 6**：`_get_message_dbs()` 函数（支持 message_10/11 等多位数）
-```python
-def _get_message_dbs() -> list[str]:
-    data_dir = _find_data_dir()
-    pattern = os.path.join(data_dir, "message", "message_*.db")
-    dbs = [
-        db for db in glob.glob(pattern)
-        if os.path.basename(db).replace("message_", "").replace(".db", "").isdigit()
-    ]
-    return sorted(dbs, key=lambda p: int(os.path.basename(p).replace("message_", "").replace(".db", "")))
-```
-
----
-
-## 常见问题
-
-| 问题 | 原因 | 处理方式 |
-|------|------|---------|
-| `HMAC 验证失败` | config.json 指向错误账号目录 | 重新确认当前登录账号，更新 db_dir |
-| `0/N keys found` | 微信版本更新改变内存布局 | 重签名 + 重新运行扫描器 |
-| `lldb attach 失败` | 微信未重签名 | `sudo codesign --force --deep --sign - /Applications/WeChat.app` |
-| 消息查询为空 | server.py 未修改 | 按"server.py 必要修改"一节重新修改 |
-| MCP 工具无法调用 | 未重启 Claude Code | 重启后 MCP 自动加载 |
-| 扫描结果有大量 `(unknown)` key | 本机有多个微信账号，扫描器发现所有账号的 key，但只能对应主账号的文件路径 | 正常现象，不影响主账号解密 |
+全库内容一致必须比较对象定义及全部逻辑内容，保留类型、BLOB 字节和重复行，采用确定性顺序。表名可见、行数相同或 `integrity_check=ok` 都不能单独证明成功。
+
+## 7. 交付报告与可选查询
+
+报告列出：实现与测试状态、授权范围、快照时点、逐库状态、WAL 处理结果、认证与结构检查、内容比对范围、输出位置和未解决项。成功、缺密钥、失败、不支持、跳过、受限恢复分别统计；任何失败均须说明，不预设某一个库失败“正常”。
+
+“最新”最多指采集一致快照中有效且已提交的状态，不代表客户端此刻状态。不在报告里输出聊天正文或密钥。
+
+数据库结构确认后，可参考 `references/database-schema.md` 做只读查询。解密成功不代表正文解码、压缩处理或附件关联完成。
+
+MCP 查询服务为独立可选工作：仅在用户需要时实现或适配，对已验收的明文库只读访问，限制数据范围与查询权限，另行测试并按所用客户端配置。未实际实现、注册与验证前，不宣称“MCP 已就绪”。
