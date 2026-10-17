@@ -2,7 +2,15 @@
 
 面向 Claude Code、Codex 等 coding agent 的技能与实现规范，用于在授权范围内将 macOS 微信 4.x 的本地 SQLCipher 数据库恢复为标准 SQLite 数据库。
 
-本项目不再依赖下载旧上游的扫描与解密脚本。即使原依赖不可用，Agent 也可依据仓库内的完整指南自行实现、测试和验收。当前仓库提供文档，不附带可直接运行的解密器或 MCP Server。
+## 上游已不可用，现在怎么使用？
+
+旧版依赖的 `cocohahaha/wechat-decrypt-macos` 已不可用（见 [Issue #1](https://github.com/robbin/wechat-exporter/issues/1)），原来的克隆、下载和安装流程不能再作为使用方式。本项目已改为提供独立实现规范，不再依赖取得旧上游源码。
+
+现在的方式是：把本仓库交给 coding agent，让它依据内置规范自行编写工具，再完成测试与导出，而不是让它下载一套现成脚本。你不需要手工重写这些程序，Agent 可以承担实现工作。
+
+这里提供的不只是原理介绍：[实现指南](references/agent-decrypt-guide.md) 写明了页面布局、密钥派生与 HMAC 公式、逐页解密、WAL 处理、模块骨架、测试用例和验收标准。在指南覆盖的范围内，Agent 可以据此从零实现，并用独立测试检查结果，不需要原项目代码或历史对话。
+
+需要区分“有足够的规范让 Agent 实现”和“仓库已经附带可运行程序”：当前仓库提供的是前者，不附带现成解密器或 MCP Server。已取得密钥后的解密流程有完整规范；密钥获取的分支 A 有完整实现思路，分支 B 仍需针对具体客户端版本分析。具体边界见下文。
 
 ## 项目内容
 
@@ -49,12 +57,17 @@ cp -R references ~/.claude/skills/wechat-exporter/
 
 ### 2. 让 Agent 实现并验证
 
-建议首次使用时输入：
+也可以不安装技能，直接将本仓库地址交给 Agent，并使用下面这段提示词：
 
 ```text
-请阅读 wechat-exporter 的 SKILL.md 和完整的 references/agent-decrypt-guide.md。
-先依据规范实现工具，用 SQLCipher 合成数据验证解密、WAL 和失败分支。
-先不要读取我的微信数据、重签名或运行提权命令；完成后报告测试结果和后续所需授权。
+请读取 https://github.com/robbin/wechat-exporter 的 SKILL.md，
+以及完整的 references/agent-decrypt-guide.md（包括附录）。
+旧版依赖的上游项目已不可用，不要再下载旧脚本或依赖旧项目源码。
+请依据仓库内的实现规范，从零编写所需工具，而不是只解释操作步骤。
+先用 SQLCipher 合成数据验证页面认证、解密、WAL 处理和失败分支，
+按指南的验收标准报告实际测试结果；遇到规范未覆盖的版本差异要明确指出。
+先不要读取我的微信数据、重签名或运行提权命令；
+完成实现和测试后，再说明导出指定账号所需的授权与操作。
 ```
 
 已有通过验证的实现后，再要求导出指定账号。流程应当是：
